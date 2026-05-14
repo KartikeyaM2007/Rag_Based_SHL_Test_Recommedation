@@ -1,0 +1,294 @@
+===================================================================================
+               FULL-STACK AI SYSTEM - RAG FOR SHL ASSESSMENT RECOMMENDATION
+                         END-TO-END TECHNICAL ANALYSIS
+===================================================================================
+Author: Kartikeya
+System Type: Multi-Stage Hybrid Retrieval-Augmented Generation (RAG) System
+Core Tech: Python (FastAPI, NumPy, Scikit-Learn), Gemini 2.5-Flash, Next.js 16
+
+This document provides a complete, zero-omission technical teardown of the entire 
+offline data pipelines, online search mechanics, API architecture, and frontend 
+integration flow.
+
+-----------------------------------------------------------------------------------
+PHASE 1: OFFLINE DATA ACQUISITION & CLEANING (DATA INGESTION)
+-----------------------------------------------------------------------------------
+
+1. THE WEB SCRAPER (`scraper/scrape_shl.py`)
+   The pipeline begins with raw data collection from the SHL product catalog.
+   * Multi-Level Parsing:
+     - Catalog Scraping: Iteratively polls the dynamic catalog table using 
+       `requests` and `BeautifulSoup` to fetch assessment cards, identifying test 
+       names, full links, and support indicators.
+     - Detailed Crawling: For each card, the crawler drills deep into the individual 
+       landing pages to extract comprehensive job levels, explicit supported 
+       languages, and full test descriptions.
+     - Support Parsing: Uses CSS attribute matching to detect remote and adaptive 
+       support icons ("yes" or "no" circles).
+     - Regex Duration Extractor: Uses highly robust multi-pattern Regex to parse 
+       human-written durations (e.g., "30 minutes", "15-20 mins") into clean integer 
+       `duration_min` and `duration_max` fields.
+   * Resiliency Mechanisms:
+     - Implements a built-in retry circuit (3 attempts with a 1.5-second backoff) 
+       to handle transient 502/503 gateway errors during scraping.
+     - Outputs raw nested JSON to `data/shl_catalog_raw.json`.
+
+2. DATA NORMALIZATION & SANITIZATION (`scraper/clean_catalog.py`)
+   Refines scraped JSON into strict normalized data models.
+   * Text Normalization: Normalizes non-ASCII text via `unicodedata.normalize("NFKC")` 
+     and strips double whitespaces to ensure consistent vector comparisons later.
+   * Code Expansion: Converts technical test type codes into clear text:
+     - 'K' -> 'Knowledge & Skills'
+     - 'P' -> 'Personality & Behavior'
+     - 'C' -> 'Competencies'
+   * Unique Identity Generation: Assigns stable IDs by SHA1 hashing the canonical 
+     url or concatenated title/description. Writes to `shl_catalog_clean.json`.
+
+-----------------------------------------------------------------------------------
+PHASE 2: OFFLINE LLM-ENHANCEMENT & EMBEDDINGS (THE INDEX)
+-----------------------------------------------------------------------------------
+
+3. SYNTHETIC DATA ENRICHMENT (`llm/enrich_catalog.py`)
+   Before indexing, the catalog undergoes an enrichment cycle using Gemini 2.5 Flash 
+   to exponentially boost retrieval accuracy (widening the semantic surface).
+   * Structured Schema Engine:
+     Uses strict JSON response schema typing to instruct Gemini to output exactly:
+     - skills: Technical and soft skill tags extracted directly from context.
+     - synonyms: Alternative terminologies and industry phrasing for the test.
+     - summary: A hyper-condensed, keyword-rich search-optimized summary.
+     - synthetic_queries: Generates 5-8 hypothetical natural-language queries a 
+       hiring manager might search to discover this test.
+   * State Retention: Employs persistent intermediate checkpoints to allow resuming 
+     without data loss if rate limits are encountered. Writes `shl_catalog_enriched.json`.
+
+4. VECTOR EMBEDDING GENERATION (`embeddings/generate_embeddings.py`)
+   Converts textual information into dense geometric math space.
+   * Document Composition: Combines all textual contexts (Name + Type + Summary + 
+     Description + Synthetic Queries) to create a rich, multi-perspective document text.
+   * Vector Indexing:
+     - Calls Gemini's `models/gemini-embedding-001` to embed each document into a 
+       high-dimensional mathematical representation.
+     - Saves the precomputed vectors as a highly performant compressed Numpy array 
+       `embeddings_gemini.npy` along with a `meta_gemini.json` lookup file.
+
+-----------------------------------------------------------------------------------
+PHASE 3: THE RUNTIME ARCHITECTURE (ONLINE BACKEND PIPELINE)
+-----------------------------------------------------------------------------------
+
+When a user hits the API, the system acts as a 3-Stage hybrid pipeline orchestrated 
+by `app/retriever.py`.
+
+5. THE KEY MANAGER LAYER (`app/key_manager.py`)
+   To enable production-level traffic on standard Gemini free keys, the system operates 
+   an automated Key Manager singleton.
+   * Safe Rotation: Loads 3 API keys concurrently. After every API query, the active 
+     client index increments (`(idx + 1) % 3`) and enforces a throttle sleep (1s) 
+     to seamlessly and completely dodge 429 Rate Limits.
+
+6. STAGE 1: QUERY REWRITING & REASONING (`llm/query_rewriter.py`)
+   Converts user phrasing into technical specifications.
+   * Uses Gemini 2.5 Flash to read the raw user search string.
+   * Rewrites the string using HyDE (Hypothetical Document Embeddings) to generate a 
+     statistically ideal document match text.
+   * Extracts strict structured filters in JSON:
+     - SKILL: e.g., "Java"
+     - SOFT: e.g., "collaboration"
+     - JOBLEVEL: "Management"
+     - DURATION: 45
+
+7. STAGE 2: HYBRID DENSE-LEXICAL SEARCH (`embeddings/hybrid_retriever.py`)
+   Performs two distinct searches simultaneously and fuses the scores:
+   * Sub-Search A (Vector / Semantic):
+     Passes the rewritten query back to the embedding model. Uses NumPy to perform 
+     a lightning-fast Cosine Similarity matrix multiplication across all vectors 
+     in `embeddings_gemini.npy` (Weights: 75%).
+   * Sub-Search B (TF-IDF / Lexical):
+     Applies Sklearn's `TfidfVectorizer` to find exact keyword overlaps on technical 
+     jargon (Weights: 25%).
+   * Metadata Boosting (Fine-Tuning):
+     Dynamically inspects search candidates. If the metadata contains matches to the 
+     extracted duration constraint or job level, the algorithm injects a dynamic 
+     scalar boost (+0.12) to the final score!
+   * Output: Passes the highly curated **Top 20 Candidates** to Stage 3.
+
+8. STAGE 3: LLM RE-RANKER & REASONING ENGINES (`llm/reranker.py`)
+   Acts as the final recruiter's critical filter.
+   * Receives the user's intent and the Top 20 candidates.
+   * Gemini 2.5 Flash carefully reviews each candidate in sequence, pruning non-viable 
+     logical matches.
+   * The model returns the strictly finalized sorted list of Top 10 recommendations.
+   * Crucially, Gemini generates a human-readable `relevance_reason` explaining 
+     *why* that test fits the user's criteria.
+
+-----------------------------------------------------------------------------------
+PHASE 4: API EXPOSURE & BACKEND HOSTING (RENDER)
+-----------------------------------------------------------------------------------
+
+9. FASTAPI ORCHESTRATOR (`app/main.py`)
+   * Exposes lightweight, async endpoints `/recommend` and `/health`.
+   * Uses Pydantic schemas for robust input validation of queries.
+   * Implements permissive wildcard CORS configurations (`allow_origins=["*"]`) to 
+     enable seamless communication with decoupled Frontends.
+
+10. DEPLOYMENT & INFRASTRUCTURE (`render.yaml` & `start.sh`)
+    * Hosted on Render's Linux platform using a custom `render.yaml` Blueprint.
+    * Bypasses Windows permission anomalies via explicit shell wrappers (`bash start.sh`).
+    * Dynamically forces `export PYTHONUTF8=1` to ensure zero Unicode errors when 
+      outputting Emoji logging metrics in standard CLI logs.
+
+-----------------------------------------------------------------------------------
+PHASE 5: FRONTEND VISUALIZATION (VERCEL)
+-----------------------------------------------------------------------------------
+
+11. SERVER-SIDE ROUTING & SECURE PROXYING (`next.config.ts`)
+    To maintain clean code hygiene and security, Next.js intercepts all calls to 
+    `/api/recommend`.
+    * Leveraging Next.js edge rewrites, it acts as a secure network-level reverse proxy, 
+      forwarding the browser traffic to the configured `$env:BACKEND_URL` (Render) 
+      transparently, protecting the exact backend URL signature from standard UI builds.
+
+12. REAL-TIME STATE PROVIDERS (`components/ServerStatusProvider.tsx`)
+    * Because Render Free Instances spin down after 15 minutes, the frontend includes 
+      a intelligent active poller.
+    * It continually pings `/api/health` in 2s increments.
+    * Provides smooth visual states to the user ("Booting up...", "Connecting...", 
+      "Online") so the client is never left staring at a broken interface during a 
+      cold start wake-up cycle.
+
+13. REACT RENDERING SYSTEM (`app/page.tsx` & `components/Search.tsx`)
+    * Features modern high-contrast design styling utilizing TailwindCSS utility classes.
+    * Utilizes state-driven tracking for multi-tier interaction states (Idle, Loading, 
+      Results, Empty, Error).
+    * Presents results via fully responsive cards, rendering duration times, 
+      dynamic tags (e.g. "Personality & Behavior"), rich summaries, and AI-generated 
+      reasoning explanations.
+
+-----------------------------------------------------------------------------------
+PHASE 6: COMPLETE PROJECT ARCHITECTURE (FOLDER STRUCTURE)
+-----------------------------------------------------------------------------------
+Below is the complete directory mapping of the repository. If an interviewer points 
+to any file or folder, here is exactly what it represents:
+
+RagTestAssesment/
+├── backend/                           # FastAPI Microservice (Python 3.11)
+│   ├── app/                           # API Layer & Business Logic
+│   │   ├── config.py                  # Environment parsing & model settings validation.
+│   │   ├── key_manager.py             # Rotating Singleton provider for Gemini clients.
+│   │   ├── main.py                    # FastAPI routes (/recommend) & global CORS.
+│   │   ├── models.py                  # Pydantic strict data models for validation.
+│   │   └── retriever.py               # The orchestrator that pipes the 3-Stage pipeline.
+│   │
+│   ├── data/                          # Local Storage & Vector Database Store
+│   │   ├── train_test/                # Folder holding Excel evaluation datasets.
+│   │   ├── embeddings_gemini.npy      # Compressed NumPy Vector Matrix (Fast Matrix Math).
+│   │   ├── meta_gemini.json           # JSON mapping system matching IDs to item meta.
+│   │   └── shl_catalog_*.json         # Data stages: Raw HTML -> Clean -> AI Enriched.
+│   │
+│   ├── embeddings/                    # Retrieval Mathematical Foundations
+│   │   ├── generate_embeddings.py     # Script generating the .npy vector index offline.
+│   │   └── hybrid_retriever.py        # Class managing Cosine Similarity + TF-IDF + Boosts.
+│   │
+│   ├── eval/                          # Performance Tracking & Benchmarking
+│   │   ├── eval_baseline.py           # Script tracking Recall without LLM reasoning.
+│   │   ├── eval_llm_enhanced.py       # Master benchmarking script to measure pipeline.
+│   │   └── llm_cache.json             # Local caching layer saving Gemini query costs.
+│   │
+│   ├── llm/                           # Generative AI Implementation Modules
+│   │   ├── enrich_catalog.py          # Script creating synthetic database entries offline.
+│   │   ├── query_rewriter.py          # Logic executing HyDE & extracting JSON filters.
+│   │   └── reranker.py                # Logic invoking LLM reasoning and sorting filters.
+│   │
+│   ├── scraper/                       # Offline Automated Ingestion Crawler
+│   │   ├── scrape_shl.py              # Recursive crawler gathering target HTML data.
+│   │   └── clean_catalog.py           # Sanitization module applying hash identifiers.
+│   │
+│   ├── .venv/                         # Isolated Python virtual environment runtime.
+│   ├── requirements.txt               # List of Python packages required (pip list).
+│   ├── start.sh                       # Startup bash script utilized by Render Linux.
+│   └── output.txt                     # Persisted benchmark run results console log.
+│
+├── frontend/                          # Client Interface (Next.js 16 / React 19)
+│   ├── app/                           # React Server-Side Render (SSR) Structure
+│   │   ├── page.tsx                   # Main user dashboard and UI structure.
+│   │   ├── layout.tsx                 # Global app container & HTML settings.
+│   │   └── globals.css                # CSS setup featuring custom Tailwind layers.
+│   │
+│   ├── components/                    # Modulized UI Component Blocks
+│   │   ├── ResultsDisplay.tsx         # Layout rendering result cards & AI reasons.
+│   │   ├── Search.tsx                 # State hub running API queries & tracking loads.
+│   │   ├── SearchBar.tsx              # Main interactive form input UI element.
+│   │   └── ServerStatusProvider.tsx   # Health listener managing Render wake-up cues.
+│   │
+│   ├── next.config.ts                 # Next.js server configuration & Edge Proxy settings.
+│   ├── package.json                   # Node setup, commands, and third-party libs list.
+│   └── tsconfig.json                  # High-strictness Typescript configuration.
+│
+├── .gitignore                         # Exclusion list preventing env/cache leaks.
+├── README.md                          # Global high-level project documentation.
+├── render.yaml                        # Production Blueprint (Infrastructure-as-Code).
+├── run.ps1                            # Windows PowerShell one-click setup launcher.
+└── workflow.txt                       # Zero-Omission End-to-End Architecture Guide.
+
+-----------------------------------------------------------------------------------
+PHASE 7: VISUAL DATA LIFECYCLE & RUNTIME WORKFLOWS (INTERVIEW WHITEBOARD)
+-----------------------------------------------------------------------------------
+If asked to whiteboard the two main cycles of the system, use these mappings:
+
+A] OFFLINE SYSTEM LIFE CYCLE (Data Ingestion & Preparation)
+===========================================================
+
+[ SHL.com Web Server ]
+      │
+      ▼
+1. [ scraper/scrape_shl.py ] ────────► Fetches HTML -> Parsed Metadata
+      │                                 Saved to: `data/shl_catalog_raw.json`
+      ▼
+2. [ scraper/clean_catalog.py ] ──────► Normalizes Unicode text -> Replaces type codes
+      │                                 Saved to: `data/shl_catalog_clean.json`
+      ▼
+3. [ llm/enrich_catalog.py ] ────────► Sends context to Gemini -> Receives JSON schema
+      │                                 (Synthetic queries + Synonyms + Skill maps)
+      │                                 Saved to: `data/shl_catalog_enriched.json`
+      ▼
+4. [ embeddings/generate_embeddings.py ]
+      │
+      ├──► Compiles full textual contextual document blocks.
+      ├──► Runs texts through `models/gemini-embedding-001` models.
+      └──► Saves 768-dimensional dense matrix to: `data/embeddings_gemini.npy`
+
+
+B] ONLINE RUNTIME PIPELINE (User Query to Screen Recommendation)
+================================================================
+
+[ USER BROWSER ] ────► Enters: "Java developer test under 30 mins"
+      │
+      ▼
+[ 1. NEXT.JS FRONTEND ] ───► Triggers React state loading indicators
+      │                      Calls: `/api/recommend`
+      ▼
+[ 2. VERCEL ROUTING PROXY ] ───► Rewrites `/api/` to target Render Backend Domain
+      │
+      ▼
+[ 3. FASTAPI SERVER (Render) ] ───► Pings `KeyManager` for clean API Key
+      │
+      ▼
+[ 4. QUERY REWRITER (LLM) ] ───► Generates hypothetical ideal document (HyDE)
+      │                          Extracts structured filters: { DURATION: 30 }
+      ▼
+[ 5. HYBRID RETRIEVER ]
+      │
+      ├──► [Dense Semantic]: Vector matrix Cosine multiplication (Weight: 0.75)
+      ├──► [Lexical TF-IDF]: Tokenizing string match intersections (Weight: 0.25)
+      └──► [Metadata Boost]: Dynamic score addition if DURATION <= 30 mins.
+      │
+      ▼ (Top 20 candidates selected)
+      │
+[ 6. LLM RE-RANKER ] ───► Gemini reads candidates and user intent.
+      │                    Sorts by strict recruiter reasoning.
+      │                    Generates personalized text `relevance_reason` for Top 10.
+      ▼
+[ 7. UI UPDATE ] ───► JSON response streamed to browser -> Dynamic Cards render 🚀
+
+===================================================================================
+                             [END OF ANALYSIS DOCUMENT]
+===================================================================================
