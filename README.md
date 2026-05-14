@@ -19,6 +19,8 @@ An advanced Recommendation System for SHL assessments that uses **Hybrid Search 
 
 ## Tech Stack
 
+
+## live Link :  https://rag-based-shl-test-recommedation-lemon.vercel.app/
 ### Backend
 
 * **Language**: Python 3.10+
