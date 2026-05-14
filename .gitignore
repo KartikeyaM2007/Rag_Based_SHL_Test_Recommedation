@@ -1,0 +1,43 @@
+# System & OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.swp
+*.swo
+
+# Python / Backend Artifacts
+backend/__pycache__/
+backend/.venv/
+backend/env/
+backend/*.py[cod]
+backend/output.txt
+backend/.pytest_cache/
+
+# Node / Frontend Artifacts
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+
+# Environment Config Files
+.env
+.env.local
+.env.*.local
+**/backend/.env
+**/backend/.env.*
+!**/backend/.env.example
+**/frontend/.env
+**/frontend/.env.*
+!**/frontend/.env.example
+
+# Evaluation Outputs and Caches
+**/backend/eval/llm_cache.json
+**/backend/eval/*_results_*.json
+**/backend/eval/*_results_*.csv

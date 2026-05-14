@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Configuration
+.env
+.env.*
+!.env.example
+
+# IDE and editor configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python Test Caching
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Evaluation & LLM Generation Caches / Outputs
+eval/llm_cache.json
+eval/llm_enhanced_results_*.json
+eval/llm_enhanced_results_*.csv
+eval/baseline_results_*.json
+eval/baseline_results_*.csv
+
+# General OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+output.txt

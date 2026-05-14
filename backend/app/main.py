@@ -1,0 +1,97 @@
+import asyncio
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.schemas import QueryRequest, RecommendationResponse
+from app.retriever import retrieve_assessments
+from app.reranker import rerank_results
+
+app = FastAPI(
+    title="SHL Assessment Recommendation API",
+    description="AI-powered assessment recommendation engine",
+    version="1.0.0"
+)
+
+# ---------------------------------------------------------
+# CORS CONFIG (INCLUDE YOUR VERCEL URL)
+# ---------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------
+# Health check
+# ---------------------------------------------------------
+@app.get("/health")
+@app.get("/api/health")
+def health():
+    return {
+        "status": "healthy",
+        "service": "SHL Assessment Recommender",
+        "model_ready": True # Always ready as clients are lightweight
+    }
+
+# ---------------------------------------------------------
+# Main recommend endpoint
+# ---------------------------------------------------------
+@app.post("/recommend", response_model=RecommendationResponse)
+@app.post("/api/recommend", response_model=RecommendationResponse)
+async def recommend(payload: QueryRequest):
+    try:
+        raw_results = await asyncio.to_thread(
+            retrieve_assessments,
+            payload.query,
+            top_k=20
+        )
+
+        final_results = await asyncio.to_thread(
+            rerank_results,
+            payload.query,
+            raw_results,
+            top_k=payload.top_k
+        )
+
+        formatted_assessments = []
+        for result in final_results:
+            # Since reranker spreads candidate with **candidate, 
+            # fields are available directly on result
+            duration_min = result.get("duration_min")
+            duration_max = result.get("duration_max")
+            duration = int(duration_max or duration_min or 0)
+
+            # Get full description from result
+            description = result.get("description", "")
+            
+            test_types = result.get("test_types", [])
+            if isinstance(test_types, list):
+                test_type_names = [
+                    t.get("name", str(t)) if isinstance(t, dict)
+                    else str(t)
+                    for t in test_types
+                ]
+            else:
+                test_type_names = [str(test_types)]
+
+            formatted_assessments.append({
+                "url": result.get("url", ""),
+                "name": result.get("name", ""),
+                "adaptive_support": "Yes" if result.get("adaptive_support") else "No",
+                "description": description,
+                "duration": duration,
+                "remote_support": "Yes" if result.get("remote_support") else "No",
+                "test_type": test_type_names
+            })
+
+        return RecommendationResponse(
+            recommended_assessments=formatted_assessments
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing request: {e}"
+        )
